@@ -1,0 +1,146 @@
+name: Wernicke Code Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to create (e.g. v1.0.0)
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  NODE_OPTIONS: --max-old-space-size=8192
+  ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  macos:
+    name: macOS (Apple Silicon)
+    runs-on: macos-14
+    timeout-minutes: 180
+    env:
+      npm_config_arch: arm64
+      VSCODE_ARCH: arm64
+      GYP_DEFINES: "kerberos_use_rtld=false"
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+
+      - name: Install dependencies
+        run: |
+          set -e
+          python3 -m pip install --break-system-packages setuptools
+          for i in {1..5}; do
+            npm ci && break
+            if [ $i -eq 5 ]; then echo "npm ci failed too many times" >&2; exit 1; fi
+            echo "npm ci failed $i, retrying..."
+          done
+
+      - name: Download built-in extensions
+        run: node build/lib/builtInExtensions.ts
+
+      - name: Build app
+        run: npm run gulp vscode-darwin-arm64
+
+      - name: Sign (ad-hoc) and package DMG
+        run: |
+          set -e
+          APP_NAME="$(node -p "require('./product.json').nameLong")"
+          APP="../VSCode-darwin-arm64/$APP_NAME.app"
+          codesign --force --deep --sign - "$APP"
+          mkdir -p dist
+          hdiutil create -volname "$APP_NAME" -srcfolder "$APP" -ov -format UDZO "dist/WernickeCode-macOS-arm64.dmg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*
+
+  windows:
+    name: Windows (x64)
+    runs-on: windows-2022
+    timeout-minutes: 180
+    env:
+      npm_config_arch: x64
+      VSCODE_ARCH: x64
+      npm_config_foreground_scripts: "true"
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          . build/azure-pipelines/win32/exec.ps1
+          $ErrorActionPreference = "Stop"
+          for ($i = 1; $i -le 5; $i++) {
+            try { exec { npm ci }; break }
+            catch {
+              if ($i -eq 5) { throw }
+              Write-Host "npm ci failed attempt $i, retrying..."
+              Start-Sleep -Seconds 2
+            }
+          }
+
+      - name: Download built-in extensions
+        run: node build/lib/builtInExtensions.ts
+
+      - name: Build app
+        run: npm run gulp vscode-win32-x64
+
+      - name: Build installer
+        run: |
+          npm run gulp vscode-win32-x64-inno-updater
+          npm run gulp vscode-win32-x64-user-setup
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $setup = Get-ChildItem .build -Recurse -Filter "VSCodeSetup*.exe" | Select-Object -First 1
+          Copy-Item $setup.FullName dist/WernickeCode-Windows-x64-Setup.exe
+          Compress-Archive -Path ../VSCode-win32-x64/* -DestinationPath dist/WernickeCode-Windows-x64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+
+  release:
+    name: Publish release
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          gh release create "$TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Wernicke Code $TAG" \
+            --notes "Wernicke Code — a personal build of VS Code.
+
+          **macOS (Apple Silicon):** download the .dmg, drag the app to Applications, then run once in Terminal:
+          \`xattr -cr \"/Applications/Wernicke Code.app\"\` (the app is not notarized by Apple).
+
+          **Windows:** run the Setup .exe (SmartScreen: More info → Run anyway), or unzip the portable .zip."
