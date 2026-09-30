@@ -14,6 +14,12 @@
   "contributes": {
     "themes": [
       {
+        "id": "Wernicke Dark",
+        "label": "Wernicke Dark",
+        "uiTheme": "vs-dark",
+        "path": "./themes/wernicke_dark.json"
+      },
+      {
         "id": "Default Dark+",
         "label": "%darkPlusColorThemeLabel%",
         "uiTheme": "vs-dark",
